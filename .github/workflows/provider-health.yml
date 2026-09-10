@@ -1,0 +1,35 @@
+# Server 1 was dead on all 265,000 pages for a day before anyone noticed, because
+# a provider repurposed itself overnight while still answering HTTP 200 with a
+# normal-looking shell. Only watching the <video> element catches that, so this
+# runs the real browser check on a schedule and fails loudly. Which providers
+# they are arrives in a secret; this repository is public and names none.
+name: provider health
+
+on:
+  schedule:
+    - cron: "0 6 * * *"      # daily, before the usual deploy window
+  workflow_dispatch:
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install playwright sentry-sdk && python -m playwright install --with-deps chromium
+      - name: Every provider, five popular titles, judged by the video element
+        env:
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          # The list of players lives in a secret, never in this public repo.
+          PROVIDERS_JSON: ${{ secrets.PROVIDERS_JSON }}
+        run: python scripts/measure/provider_health.py --json health.json
+      # Runs even when the step above exits non-zero, because the report of
+      # which provider died is exactly what is wanted when it fails.
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: provider-health
+          path: health.json

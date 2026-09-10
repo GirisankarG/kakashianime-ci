@@ -71,8 +71,12 @@ def providers() -> list[tuple[str, str, str]]:
 
 # Popular, long-running, and varied in era: a provider that has any library
 # at all should carry these. A failure here is the provider, not the title.
+# Three, not five. Each check sits through 17 seconds of deliberate waits, so
+# 13 providers x 5 titles is 65 checks and over 50 minutes: both CI runs were
+# cancelled mid-flight and the second one only got through two titles. Three
+# still separates "this provider is down" from "this provider lacks this
+# title", which is the only thing the count is for, and it finishes.
 TITLES = [("Attack on Titan", 16498, 16498), ("Mob Psycho 100 II", 37510, 101338),
-          ("Gate", 28907, 20994), ("Wotakoi", 35968, 99578),
           ("Death Note", 1535, 1535)]
 
 

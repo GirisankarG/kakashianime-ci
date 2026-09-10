@@ -13,7 +13,12 @@ on:
 jobs:
   health:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # 13 providers x 5 titles is 65 checks, and each one sits through 17
+    # seconds of deliberate waits before it can judge the video element. That
+    # is 22 minutes of floor, so a 25 minute limit cancelled the first run
+    # mid-flight. Minutes are unmetered on a public repository, so the limit
+    # only needs to be past the real cost.
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -25,7 +30,10 @@ jobs:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
           # The list of players lives in a secret, never in this public repo.
           PROVIDERS_JSON: ${{ secrets.PROVIDERS_JSON }}
-        run: python scripts/measure/provider_health.py --json health.json
+        # -u so progress streams. Python buffers stdout when it is not a
+        # terminal, and the first run printed nothing for 25 minutes, which
+        # made a working check and a hung one look identical.
+        run: python -u scripts/measure/provider_health.py --json health.json
       # Runs even when the step above exits non-zero, because the report of
       # which provider died is exactly what is wanted when it fails.
       - if: always()

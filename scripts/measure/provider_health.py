@@ -89,6 +89,25 @@ def playing(frame) -> bool:
     return False
 
 
+# A frame that never got a page, or got a bot wall instead of a player, says
+# nothing about the provider. From GitHub's runners one provider's five servers
+# scored 0/3 while a residential run the same hour had them at 2-3/3, because
+# Cloudflare-fronted hosts challenge datacenter IPs. Counting that as dead
+# would publish a rank that demotes five working servers for every visitor.
+WALL = ("just a moment", "attention required", "access denied", "checking your browser",
+        "verify you are human", "enable javascript and cookies")
+
+
+def blocked(frame) -> bool:
+    try:
+        if frame.url in ("", "about:blank"):
+            return True
+        text = frame.evaluate("(document.title+' '+(document.body?document.body.innerText:'')).slice(0,600).toLowerCase()")
+        return any(w in text for w in WALL)
+    except Exception:
+        return True
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--json", default=None)
@@ -101,6 +120,7 @@ def main():
     if not provs:
         print("no providers configured (set PROVIDERS_JSON)"); sys.exit(2)
     score = {n: 0 for n, _, _, _ in provs}
+    walls = {n: 0 for n, _, _, _ in provs}
     slot_of = {n: s for n, _, _, s in provs}
     with sync_playwright() as pw:
         b = pw.chromium.launch(headless=True,
@@ -127,19 +147,26 @@ def main():
                     if p != page:
                         p.close()
                 ok = bool(f) and playing(f)
+                wall = (not ok) and (not f or blocked(f))
                 score[name] += ok
-                print(f"   {name:16s} {'PLAYS' if ok else 'dead '}")
+                walls[name] += wall
+                print(f"   {name:16s} {'PLAYS' if ok else ('blocked' if wall else 'dead ')}")
         b.close()
 
     n = len(TITLES)
     print(f"\n  provider health, {n} popular titles, audio={a.audio}")
+    # Dead means: played nothing AND at least one attempt actually reached
+    # the provider. A provider that walled every attempt is unverified from
+    # this vantage point and is neither demoted nor cleared.
+    unverified = [k for k in score if score[k] == 0 and walls[k] == n]
     for name, hits in sorted(score.items(), key=lambda kv: -kv[1]):
-        flag = "   <-- DEAD, must not lead" if hits == 0 else ""
+        flag = ("   <-- unverified: blocked from here" if name in unverified
+                else "   <-- DEAD, must not lead" if hits == 0 else "")
         print(f"    {name:16s} {hits}/{n}{flag}")
     if a.json:
         Path(a.json).write_text(json.dumps(score, indent=1))
         print(f"\n  saved -> {a.json}")
-    dead = [k for k, v in score.items() if v == 0]
+    dead = [k for k, v in score.items() if v == 0 and k not in unverified]
     if a.rank:
         # Slots, never names: this file is served from the site's own domain.
         import datetime
@@ -147,9 +174,10 @@ def main():
             "v": datetime.datetime.utcnow().strftime("%Y%m%d"),
             "titles": n,
             "dead": sorted(slot_of[k] for k in dead),
+            "unverified": sorted(slot_of[k] for k in unverified),
             "score": {str(slot_of[k]): v for k, v in score.items()},
         }))
-        print(f"  rank -> {a.rank}  ({len(dead)} dead slot(s))")
+        print(f"  rank -> {a.rank}  ({len(dead)} dead, {len(unverified)} unverified slot(s))")
     if dead:
         print(f"\n  {len(dead)} provider(s) play nothing: {', '.join(dead)}")
         delivered = report(dead, score, n)

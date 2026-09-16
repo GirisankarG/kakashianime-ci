@@ -1,0 +1,66 @@
+# Server 1 was dead on all 265,000 pages for a day before anyone noticed, because
+# a provider repurposed itself overnight while still answering HTTP 200 with a
+# normal-looking shell. Only watching the <video> element catches that, so this
+# runs the real browser check on a schedule and fails loudly.
+name: health
+
+on:
+  schedule:
+    - cron: "0 6 * * *"      # daily, before the usual deploy window
+  workflow_dispatch:
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    # 13 providers x 5 titles is 65 checks, and each one sits through 17
+    # seconds of deliberate waits before it can judge the video element. That
+    # is 22 minutes of floor, so a 25 minute limit cancelled the first run
+    # mid-flight. Minutes are unmetered on a public repository, so the limit
+    # only needs to be past the real cost.
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install playwright && python -m playwright install --with-deps chromium
+      - name: Every provider, five popular titles, judged by the video element
+        env:
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+          # The provider table. Absent, the script falls back to the private
+          # repo's own module, which does not exist in the public checkout, so
+          # the run dies in 35 seconds with ModuleNotFoundError. That is the
+          # right failure: a public run must never see the private table.
+          PROVIDERS_JSON: ${{ secrets.PROVIDERS_JSON }}
+        # -u so progress streams. Python buffers stdout when it is not a
+        # terminal, and the first run printed nothing for 25 minutes, which
+        # made a working check and a hung one look identical.
+        run: python -u scripts/measure/provider_health.py --json health.json --rank rank.json
+      # Runs even when the step above exits non-zero, because the report of
+      # which provider died is exactly what is wanted when it fails.
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: provider-health
+          path: |
+            health.json
+            rank.json
+      # The verdict goes live. player.js reads health/rank.txt at load and
+      # moves dead slots to the back, so a provider that died overnight stops
+      # leading the same morning with no rebuild. Runs when the check FAILED
+      # too: a failure is exactly when the pages need to hear about it. Skips
+      # only when there is no rank file at all, which means the check itself
+      # crashed rather than finding dead providers.
+      - if: always() && hashFiles('rank.json') != ''
+        name: Publish today's rank for player.js
+        env:
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+        run: pip install boto3 && python scripts/measure/publish_rank.py rank.json
+
+  # No `sources` job here on purpose. scripts/measure/source_health.py prints
+  # crawl-source hostnames, which must never reach a public log, and GitHub's
+  # datacenter IPs get 403 from the Cloudflare-fronted sources, so from here it
+  # would report live sources dead. daily.sh runs it from the laptop.

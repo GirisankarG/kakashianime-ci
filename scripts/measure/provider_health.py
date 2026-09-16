@@ -114,6 +114,9 @@ def main():
     ap.add_argument("--audio", default="sub")
     ap.add_argument("--rank", default=None,
                     help="write the public rank file: dead slots only, no names")
+    ap.add_argument("--vantage", default="ci",
+                    help="where this ran. 'residential' is what visitors see and "
+                         "outranks 'ci', where Cloudflare walls the runner")
     a = ap.parse_args()
 
     provs = providers()
@@ -172,6 +175,7 @@ def main():
         import datetime
         Path(a.rank).write_text(json.dumps({
             "v": datetime.datetime.utcnow().strftime("%Y%m%d"),
+            "vantage": a.vantage,
             "titles": n,
             "dead": sorted(slot_of[k] for k in dead),
             "unverified": sorted(slot_of[k] for k in unverified),

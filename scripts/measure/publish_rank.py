@@ -61,6 +61,22 @@ def main() -> int:
                       aws_access_key_id=env["R2_ACCESS_KEY_ID"],
                       aws_secret_access_key=env["R2_SECRET_ACCESS_KEY"],
                       region_name="auto")
+
+    # Vantage decides, not arrival order. A CI run is walled by Cloudflare on
+    # some providers and a residential run is not, so a CI verdict must never
+    # land on top of the same day's residential one. Without this the file is
+    # simply whoever published last: a manual CI dispatch this afternoon
+    # replaced a residential verdict and moved a provider back to unverified.
+    mine = rank.get("vantage", "ci")
+    try:
+        current = json.loads(s3.get_object(Bucket=bucket, Key=KEY)["Body"].read())
+    except Exception:
+        current = {}
+    if (current.get("v") == rank.get("v")
+            and current.get("vantage") == "residential" and mine != "residential"):
+        print(f"keeping today's residential verdict; not overwriting it from {mine}")
+        return 0
+
     body = json.dumps(rank, separators=(",", ":")).encode()
     s3.put_object(Bucket=bucket, Key=KEY, Body=body,
                   ContentType="application/json; charset=utf-8",
@@ -68,7 +84,8 @@ def main() -> int:
     head = s3.head_object(Bucket=bucket, Key=KEY)
     ok = head["ContentLength"] == len(body)
     print(f"{'published' if ok else 'SIZE MISMATCH'} {KEY}: {len(body)} bytes, "
-          f"{len(rank['dead'])} dead slot(s) of {len(rank['score'])}, v={rank.get('v')}")
+          f"{len(rank['dead'])} dead slot(s) of {len(rank['score'])}, "
+          f"v={rank.get('v')}, vantage={mine}")
     return 0 if ok else 1
 
 

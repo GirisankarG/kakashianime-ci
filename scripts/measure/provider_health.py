@@ -94,18 +94,26 @@ def playing(frame) -> bool:
 # scored 0/3 while a residential run the same hour had them at 2-3/3, because
 # Cloudflare-fronted hosts challenge datacenter IPs. Counting that as dead
 # would publish a rank that demotes five working servers for every visitor.
-WALL = ("just a moment", "attention required", "access denied", "checking your browser",
-        "verify you are human", "enable javascript and cookies")
+WALLED_STATUS = (401, 403, 429, 503)
 
 
-def blocked(frame) -> bool:
-    try:
-        if frame.url in ("", "about:blank"):
-            return True
-        text = frame.evaluate("(document.title+' '+(document.body?document.body.innerText:'')).slice(0,600).toLowerCase()")
-        return any(w in text for w in WALL)
-    except Exception:
-        return True
+def blocked(url: str, seen: dict) -> bool:
+    """Did this provider serve a wall instead of a player?
+
+    Judged on the response status, not on the DOM. The first version read
+    document.title out of the frame, which is the one thing a bot wall is
+    built not to let you do: the run went from 11m40s to over 36 minutes,
+    close enough to the 50 minute limit to start cancelling. `evaluate` also
+    takes no timeout in this Playwright version, so the obvious fix would
+    have thrown on every call and, through the except, marked every provider
+    blocked and demoted nothing ever again.
+
+    A status is recorded by a listener as the response arrives, so reading it
+    costs nothing and cannot hang. 403 and 503 are what Cloudflare answers a
+    datacenter IP; no response at all means the frame never loaded.
+    """
+    status = seen.get(url)
+    return status is None or status in WALLED_STATUS
 
 
 def main():
@@ -131,6 +139,10 @@ def main():
         ctx = b.new_context(viewport={"width": 1280, "height": 800})
         page = ctx.new_page()
         ctx.on("page", lambda p: p.close() if p != page else None)
+        # Recorded as responses arrive. Reading a status later cannot hang;
+        # asking the frame cost 25 minutes a run.
+        seen_status: dict = {}
+        ctx.on("response", lambda r: seen_status.__setitem__(r.url, r.status))
         for title, mal, ani in TITLES:
             print(f"== {title}")
             for name, tmpl, key, _slot in provs:
@@ -150,7 +162,7 @@ def main():
                     if p != page:
                         p.close()
                 ok = bool(f) and playing(f)
-                wall = (not ok) and (not f or blocked(f))
+                wall = (not ok) and blocked(url, seen_status)
                 score[name] += ok
                 walls[name] += wall
                 print(f"   {name:16s} {'PLAYS' if ok else ('blocked' if wall else 'dead ')}")

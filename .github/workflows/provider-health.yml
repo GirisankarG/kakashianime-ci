@@ -65,6 +65,17 @@ jobs:
       # pipeline went dark for four days in September and every watch stayed
       # green, because a job that never runs raises nothing. Runs last and
       # always, so it reports even when the provider check above failed.
+      # Is the site CURRENT, which is a different question from "is it
+      # broken" and the one that is invisible from the inside. Arun reported
+      # the site showing last week's episodes; nothing had errored. Runs
+      # first of the two because it measures what a visitor sees, where the
+      # staleness check below measures whether a job ran.
+      - if: always()
+        name: Can a visitor watch what aired last night
+        env:
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+        run: python scripts/measure/airing_lag.py --titles 25 || true
+
       - if: always()
         name: Has the daily pipeline run recently
         env:

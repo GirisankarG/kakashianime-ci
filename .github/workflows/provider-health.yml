@@ -60,6 +60,17 @@ jobs:
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
         run: pip install boto3 && python scripts/measure/publish_rank.py rank.json
 
+      # The dead-man switch. Every other check here answers "is the site
+      # broken"; this one answers "did anything look". The laptop half of the
+      # pipeline went dark for four days in September and every watch stayed
+      # green, because a job that never runs raises nothing. Runs last and
+      # always, so it reports even when the provider check above failed.
+      - if: always()
+        name: Has the daily pipeline run recently
+        env:
+          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+        run: python scripts/measure/staleness.py || true
+
   # No `sources` job here on purpose. scripts/measure/source_health.py prints
   # crawl-source hostnames, which must never reach a public log, and GitHub's
   # datacenter IPs get 403 from the Cloudflare-fronted sources, so from here it

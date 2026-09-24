@@ -46,7 +46,7 @@ jobs:
           fi
           echo "alert secrets present"
       - run: pip install playwright && python -m playwright install --with-deps chromium
-      - name: Every provider, five popular titles, judged by the video element
+      - name: Every provider, three popular titles, judged by the video element
         env:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}

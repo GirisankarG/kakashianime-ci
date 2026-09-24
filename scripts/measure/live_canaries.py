@@ -167,6 +167,27 @@ def main() -> int:
     except Exception:
         check("rank parses with a date", False)
 
+    # Search. Every page loads /search.js, which fetches /search-index.txt,
+    # and a deploy that ships the pages without that one object gives a search
+    # box that finds nothing, at HTTP 200. Keyed on what the live home page
+    # actually loads, as the stylesheet check is, so it waits by itself until
+    # search is deployed and holds from the first deploy that ships it.
+    # .txt, not .json: the edge rule 404s .json keys.
+    if 'src="/search.js"' in home:
+        sj, _ = get(base + "/search.js")
+        check("search.js resolves", sj == 200, f"got {sj}")
+        ic, idx = get(base + "/search-index.txt")
+        try:
+            rows = json.loads(idx) if ic == 200 else None
+            n = len(rows) if isinstance(rows, list) else -1
+        except ValueError:
+            n = -1
+        check("search index resolves and holds the catalogue",
+              ic == 200 and n > 15000,
+              f"HTTP {ic}, {n if n >= 0 else 'not a JSON array'} rows (need > 15,000)")
+    else:
+        oks.append("search not on the live pages yet; its index check waits for it")
+
     # Guarded on having fetched something. An empty body matches no hostname,
     # so the unguarded version reported "no source leak" as a pass while the
     # site was down, which is a check that cannot fail when it matters most.

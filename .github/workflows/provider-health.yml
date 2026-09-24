@@ -60,7 +60,7 @@ jobs:
         # -u so progress streams. Python buffers stdout when it is not a
         # terminal, and the first run printed nothing for 25 minutes, which
         # made a working check and a hung one look identical.
-        run: python -u scripts/measure/provider_health.py --json health.json --rank rank.json
+        run: bash scripts/measure/guard.sh provider-health python -u scripts/measure/provider_health.py --json health.json --rank rank.json
       # Runs even when the step above exits non-zero, because the report of
       # which provider died is exactly what is wanted when it fails.
       - if: always()
@@ -87,7 +87,7 @@ jobs:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
-        run: pip install boto3 && python scripts/measure/publish_rank.py rank.json
+        run: pip install boto3 && bash scripts/measure/guard.sh provider-rank python scripts/measure/publish_rank.py rank.json
 
       # The dead-man switch. Every other check here answers "is the site
       # broken"; this one answers "did anything look". The laptop half of the
@@ -107,7 +107,7 @@ jobs:
           ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
         # No `|| true`. Red is the signal that survives the mail failing.
-        run: python scripts/measure/airing_lag.py --titles 25
+        run: bash scripts/measure/guard.sh airing-lag python scripts/measure/airing_lag.py --titles 25
 
       # The live site's bodies, not its status codes: every way it breaks
       # answers 200. The stylesheet hash the HTML names must resolve, the
@@ -122,7 +122,7 @@ jobs:
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
           ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
-        run: python scripts/measure/live_canaries.py
+        run: bash scripts/measure/guard.sh live-site python scripts/measure/live_canaries.py
 
       - if: always()
         name: Has the daily pipeline run recently
@@ -132,13 +132,12 @@ jobs:
           ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
           EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
         # No `|| true`. Red is the signal that survives the mail failing.
-        run: python scripts/measure/staleness.py
+        run: bash scripts/measure/guard.sh nightly-watchdog python scripts/measure/staleness.py
 
-      # A check that found something has already mailed, and its subject is
-      # in alerts.sent. This fires only when the job failed and that file is
-      # empty: a crash before any alert() ran, a missing module, a cancelled
-      # runner. A run that dies before it can speak still reaches a person,
-      # and a run that already spoke does not get a second, vaguer mail.
+      # Every check above runs under guard.sh, which mails for that step when
+      # it fails without mailing. What is left for this step is a failure
+      # outside any check, the checkout or the browser install, on a run where
+      # nothing else spoke.
       - if: failure() && hashFiles('alerts.sent') == ''
         name: The run failed and no check managed to say why
         env:

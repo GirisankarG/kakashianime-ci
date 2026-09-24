@@ -29,6 +29,9 @@ from pathlib import Path
 
 SITE = "https://kakashianime.me"
 RANK = "/health/rank.txt"
+# Written by daily.sh at exit, whatever the exit. The direct answer to "did
+# the laptop nightly run", where the rank's vantage is only a side effect.
+NIGHTLY = "/health/nightly.txt"
 
 
 # Cloudflare answers 403 to urllib's default User-Agent (its "error 1010"
@@ -54,10 +57,43 @@ def main() -> int:
     ap.add_argument("--max-age", type=int, default=2,
                     help="days a residential verdict may be before it is stale")
     ap.add_argument("--site", default=SITE)
+    ap.add_argument("--nightly-max-hours", type=float, default=30,
+                    help="hours since the laptop nightly last finished; it runs "
+                         "daily, so 30 allows one late or slow run")
     a = ap.parse_args()
 
     stale: list[str] = []
-    today = dt.datetime.now(dt.timezone.utc).date()
+    now = dt.datetime.now(dt.timezone.utc)
+    today = now.date()
+
+    # Asked first because it is the cause, and the rank check below is only a
+    # symptom of it. 22 to 24 September: the job fired every morning and
+    # macOS refused bash access to ~/Desktop before line one. A nightly that
+    # cannot start never writes this file, so absence is the finding.
+    status, body = fetch(f"{a.site}{NIGHTLY}?probe={now.strftime('%Y%m%d%H')}")
+    if status == 404 or (status == 200 and not body):
+        stale.append("the laptop nightly has never reported finishing: nothing is "
+                     "refreshing airing data, building new episode pages or uploading")
+    elif status != 200:
+        stale.append(f"{NIGHTLY} unreachable (HTTP {status})")
+    else:
+        try:
+            hb = json.loads(body)
+            done = dt.datetime.fromisoformat(hb["finished"].replace("Z", "+00:00"))
+            hours = (now - done).total_seconds() / 3600
+            print(f"  nightly    : finished {hb['finished']} ({hours:.0f}h ago), "
+                  f"exit {hb.get('exit')}")
+            if hours > a.nightly_max_hours:
+                stale.append(f"the laptop nightly last finished {hours:.0f} hours ago "
+                             f"({hb['finished'][:10]}); new episodes are not being built")
+            if hb.get("exit") == 3:
+                # The laptop found something and could not mail it. This is
+                # the only machine that can say so.
+                stale.append("the laptop nightly finished with exit 3: a check there "
+                             "found a problem and its mail did not go out. Read "
+                             "logs/daily-stdout.log on the laptop")
+        except Exception as ex:
+            stale.append(f"{NIGHTLY} is not readable: {type(ex).__name__}")
 
     # Cache-bust: the edge holds a bare URL for hours, and asking it whether a
     # file is fresh through a cached copy answers the wrong question.
@@ -89,14 +125,19 @@ def main() -> int:
     for w in stale:
         print(f"  STALE: {w}")
     if not stale:
-        print("  the daily job has run recently and its verdict is current")
+        print("  the nightly has finished recently and the ranking is current")
         return 0
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from notify import alert
+    # The subject is the first finding itself, which is the cause when there
+    # is one, so the inbox line says what broke without opening the mail.
     delivered = alert(
-        f"KakashiAnime: the daily pipeline looks stale ({len(stale)} signal(s))",
-        {"stale": stale}, level="warning")
+        stale[0] + (f" (+{len(stale) - 1} more)" if len(stale) > 1 else ""),
+        {"findings": stale,
+         "check_on_the_laptop": "tail logs/daily-stderr.log; launchctl list "
+                                "me.kakashianime.daily"},
+        level="error", check="nightly-watchdog")
     return 1 if delivered else 3
 
 

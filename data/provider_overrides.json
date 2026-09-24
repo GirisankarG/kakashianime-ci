@@ -1,0 +1,14 @@
+{
+ "broken": {
+  "12": {
+   "tested": "2026-09-20",
+   "verdict": "does not play"
+  }
+ },
+ "working": {
+  "10": {
+   "tested": "2026-09-20",
+   "verdict": "worked"
+  }
+ }
+}

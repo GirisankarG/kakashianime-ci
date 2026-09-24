@@ -33,6 +33,11 @@ import boto3
 # fresh probe of each. The body is still JSON; fetch().json() does not care
 # what the extension says.
 KEY = "health/rank.txt"
+# Slots a person tested by hand and found working. Automation does not get to
+# overrule them: on 2026-09-20 a CI run published slot 10 as dead and it was
+# demoted on every page, while Arun had just played it through to the end.
+# A headless browser on a datacenter IP is not what a viewer sees.
+OVERRIDES = Path(__file__).resolve().parents[2] / "data" / "provider_overrides.json"
 
 
 def main() -> int:
@@ -42,6 +47,11 @@ def main() -> int:
     src = Path(sys.argv[1])
     try:
         rank = json.loads(src.read_text())
+        # Slot -> provider name, written beside the rank file by the health check.
+        # Used for the alert mail only and removed before publishing: rank.txt is
+        # served from the site's own domain and must name no provider.
+        names_file = Path(src).with_suffix(".names.json")
+        rank["names"] = json.loads(names_file.read_text()) if names_file.exists() else {}
         assert isinstance(rank.get("dead"), list), "no dead list"
         assert isinstance(rank.get("score"), dict) and rank["score"], "no score map"
         assert all(str(k).isdigit() for k in rank["score"]), "score keys must be slots"
@@ -72,11 +82,97 @@ def main() -> int:
         current = json.loads(s3.get_object(Bucket=bucket, Key=KEY)["Body"].read())
     except Exception:
         current = {}
+
+    # One failing run is weak evidence, and acting on it alone is how a
+    # working provider got demoted site-wide. A slot is published dead only
+    # once it has failed twice running; the first failure is recorded as
+    # pending and demotes nobody. Recovery stays immediate: one pass and it
+    # leaves both lists.
+    fresh = set(rank.get("dead", []))
+    before = set(current.get("dead", [])) | set(current.get("pending", []))
+    held = sorted(fresh - before)
+    confirmed = set(fresh & before)
+
+    # "Unverified" means this run could not reach the provider at all, and the
+    # health check promises such a slot is "neither demoted nor cleared". This
+    # file used to clear it anyway: a slot the laptop found dead, walled from
+    # CI the next morning, simply fell out of the dead list and went back to
+    # leading pages on no evidence. Carry the previous verdict forward instead.
+    unverified = set(rank.get("unverified", []))
+    carried = sorted(set(current.get("dead", [])) & unverified)
+    confirmed |= set(carried)
+
+    # And a human verdict outranks both.
+    try:
+        ov = json.loads(OVERRIDES.read_text()) if OVERRIDES.exists() else {}
+        never = {int(k) for k, v in (ov.get("working") or {}).items()}
+    except Exception:
+        never = set()
+    vetoed = sorted(s for s in confirmed if s in never)
+    confirmed -= never
+
+    # And the same evidence in the other direction. The check never demotes a
+    # provider it cannot reach, so one that is walled from CI and broken in a
+    # real browser would sit near the top forever on nobody's say-so.
+    try:
+        broken = {int(k) for k in (ov.get("broken") or {})}
+    except Exception:
+        broken = set()
+    added = sorted(broken - confirmed)
+    confirmed = sorted(confirmed | broken)
+
+    rank["dead"] = confirmed
+    rank["pending"] = held
+    if held:
+        print(f"  {len(held)} slot(s) failed once and are held, not demoted: {held}")
+    if carried:
+        print(f"  {len(carried)} slot(s) unreachable from here, previous verdict kept: {carried}")
+    if vetoed:
+        print(f"  {len(vetoed)} slot(s) failed but a person found them working: {vetoed}")
+    if added:
+        print(f"  {len(added)} slot(s) demoted because a person found them broken: {added}")
     if (current.get("v") == rank.get("v")
             and current.get("vantage") == "residential" and mine != "residential"):
+        # Before the alert, not after: this run publishes nothing, so any
+        # "change" it computed is a difference of vantage, not of the site.
         print(f"keeping today's residential verdict; not overwriting it from {mine}")
         return 0
 
+    # The alert belongs here, not in the health check, because only this step
+    # knows what CHANGED on the live pages. The check found the same three dead
+    # providers every day for a week and exited 1 every day, which made the CI
+    # job permanently red and its mail permanently ignorable. Steady state is
+    # not news. A slot newly demoted site-wide, or one back, is.
+    was_dead = set(current.get("dead", []))
+    now_dead = set(confirmed)
+    newly_dead = sorted(now_dead - was_dead)
+    # "Back" needs evidence of playing, so a slot this run could not reach is
+    # never reported as recovered.
+    recovered = sorted(was_dead - now_dead - unverified)
+    if newly_dead or recovered:
+        names = {str(k): v for k, v in (rank.get("names") or {}).items()}
+        label = lambda s: names.get(str(s), f"slot {s}")   # noqa: E731
+        parts = []
+        if newly_dead:
+            parts.append(f"{len(newly_dead)} server(s) newly demoted on every page: "
+                         + ", ".join(label(s) for s in newly_dead))
+        if recovered:
+            parts.append(f"{len(recovered)} server(s) playing again: "
+                         + ", ".join(label(s) for s in recovered))
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from notify import alert
+        alert("; ".join(parts),
+              {"newly_demoted": [label(s) for s in newly_dead],
+               "playing_again": [label(s) for s in recovered],
+               "still_demoted": [label(s) for s in sorted(now_dead - set(newly_dead))],
+               "failed_once_held": [label(s) for s in held],
+               "judged_from": mine,
+               "what_to_do": "nothing if expected; a newly demoted server that "
+                             "plays for you belongs in data/provider_overrides.json"},
+              level="error" if newly_dead else "info",
+              check="provider-rank")
+
+    rank.pop("names", None)          # never published; see the load above
     body = json.dumps(rank, separators=(",", ":")).encode()
     s3.put_object(Bucket=bucket, Key=KEY, Body=body,
                   ContentType="application/json; charset=utf-8",

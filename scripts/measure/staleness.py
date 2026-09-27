@@ -126,6 +126,10 @@ def main() -> int:
         print(f"  STALE: {w}")
     if not stale:
         print("  the nightly has finished recently and the ranking is current")
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from notify import resolved
+        if resolved("nightly-watchdog"):
+            print("  mailed: the nightly is running again")
         return 0
 
     sys.path.insert(0, str(Path(__file__).resolve().parent))

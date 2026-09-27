@@ -35,6 +35,8 @@ real finding into silence.
     python scripts/measure/notify.py --test     # one mail to ALERT_EMAIL
 """
 from __future__ import annotations
+import datetime as dt
+import hashlib
 import json
 import os
 import re
@@ -167,6 +169,67 @@ def _sentry(message: str, context: dict | None, level: str) -> bool:
         return False
 
 
+# Findings already mailed, so a standing problem is not mailed every morning.
+# Anime_Normal named this as the top noise risk on 2026-09-27, with the
+# evidence: the site had been 403 since the 26th and would have mailed daily
+# until someone re-enabled R2, which is how the channel went unread in the
+# first place. In CI this file is carried between runs by actions/cache; it is
+# deliberately NOT kept in R2, because the outage that most needs suppressing
+# is R2 being down, and a store that shares fate with the fault is no store.
+STATE = Path(os.environ.get("ALERT_STATE", "logs/alert-state.json"))
+# A standing problem is said again this often, so it is never forgotten.
+ESCALATE_DAYS = 7
+
+
+def _load() -> dict:
+    try:
+        return json.loads(STATE.read_text())
+    except (OSError, ValueError):
+        # No state is "nothing has been mailed yet", which errs toward
+        # mailing. Erring the other way would silence a real first alert.
+        return {}
+
+
+def _save(state: dict) -> None:
+    try:
+        STATE.parent.mkdir(parents=True, exist_ok=True)
+        STATE.write_text(json.dumps(state, indent=1, sort_keys=True))
+    except OSError as ex:
+        print(f"  notify: could not record alert state ({type(ex).__name__}); "
+              f"this finding will mail again next run", file=sys.stderr)
+
+
+def _fingerprint(check: str, message: str) -> str:
+    """What makes two findings 'the same problem' across runs.
+
+    Digits are removed before hashing, so "all 7 URLs" and "all 20 URLs" are
+    one standing outage rather than two. The check name is included, so the
+    same sentence from two different checks is two problems.
+    """
+    core = re.sub(r"\d+", "#", message)[:160]
+    return hashlib.sha256(f"{check}|{core}".encode()).hexdigest()[:16]
+
+
+def resolved(check: str, note: str = "") -> bool:
+    """Call when a check passes. Mails once if it had an open finding.
+
+    Without this, a cleared problem is silent, and the next occurrence looks
+    like a continuation rather than a new event.
+    """
+    state = _load()
+    open_now = {k: v for k, v in state.items() if v.get("check") == check}
+    if not open_now:
+        return False
+    first = min(v.get("first", "") for v in open_now.values())
+    for k in open_now:
+        state.pop(k, None)
+    _save(state)
+    was = open_now[sorted(open_now)[0]].get("message", "")[:100]
+    return _mail(f"[{PRODUCT}] {check}: RESOLVED, {was}",
+                 f"This cleared on its own or was fixed.\n\n"
+                 f"first reported: {first}\nwhat it was: {was}\n{note}")
+
+
 def alert(message: str, context: dict | None = None, level: str = "error",
           check: str | None = None) -> bool:
     """True only if a person will see this, which means the mail was accepted.
@@ -179,15 +242,54 @@ def alert(message: str, context: dict | None = None, level: str = "error",
     # print it twice.
     message = re.sub(rf"^{PRODUCT}:\s*", "", message.strip())
     name = _check_name(check)
-    subject = f"[{PRODUCT}] {name}: {message.splitlines()[0][:140]}"
+    # First sentence only. A subject carrying the whole finding plus its
+    # remedy is unreadable in an inbox list, and the remedy is in the body
+    # two lines down.
+    head = message.splitlines()[0]
+    first = head.split(". ")[0]
+    subject = f"[{PRODUCT}] {name}: {(first if len(first) >= 25 else head)[:110]}"
     text = (f"{message}\n\n{_render(context)}\n\n"
             f"check: {name}\nlevel: {level}\n"
             f"host: {os.environ.get('GITHUB_REPOSITORY') or 'laptop'}"
             + (f"\nrun: {os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}"
                f"/actions/runs/{os.environ['GITHUB_RUN_ID']}"
                if os.environ.get("GITHUB_RUN_ID") else ""))
+    # Sentry always gets it: it is the record, and a record with gaps is worse
+    # than a noisy one. Only the mail is rate-limited.
     _sentry(f"{PRODUCT}: {message}", context, level)
-    return _mail(subject, text)
+
+    state = _load()
+    fp = _fingerprint(name, message)
+    now = dt.datetime.now(dt.timezone.utc)
+    prior = state.get(fp)
+    if prior:
+        try:
+            age = (now - dt.datetime.fromisoformat(prior["last_mailed"])).days
+        except (KeyError, ValueError):
+            age = ESCALATE_DAYS
+        if age < ESCALATE_DAYS:
+            print(f"  notify: same finding as {prior['last_mailed'][:10]}, "
+                  f"not mailing again until day {ESCALATE_DAYS} "
+                  f"(seen {prior.get('count', 1) + 1} times)")
+            prior["count"] = prior.get("count", 1) + 1
+            prior["last_seen"] = now.isoformat(timespec="seconds")
+            _save(state)
+            # True: a person was told about this, on the day it started. The
+            # caller's exit code means "broken and someone knows", which is
+            # still true.
+            return True
+        text = (f"STILL BROKEN after {age} days, first seen "
+                f"{prior.get('first', '?')[:10]}.\n\n" + text)
+        subject = f"[{PRODUCT}] {name}: STILL, {message.splitlines()[0][:120]}"
+
+    ok = _mail(subject, text)
+    if ok:
+        state[fp] = {"check": name, "message": message.splitlines()[0][:200],
+                     "first": (prior or {}).get("first", now.isoformat(timespec="seconds")),
+                     "last_mailed": now.isoformat(timespec="seconds"),
+                     "count": (prior or {}).get("count", 0) + 1}
+        _save(state)
+    return ok
 
 
 if __name__ == "__main__":

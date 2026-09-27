@@ -92,15 +92,55 @@ fails: list[str] = []
 oks: list[str] = []
 
 
+# Every status this run saw, so the summary can tell one broken page from a
+# site that is entirely gone.
+seen_status: list[tuple[str, int]] = []
+
+
 def get(url: str, timeout: int = 30) -> tuple[int, str]:
     req = urllib.request.Request(url, headers={"User-Agent": "kakashianime-canary/1.0"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
-            return r.status, r.read().decode("utf-8", "replace")
+            code, body = r.status, r.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
-        return e.code, ""
+        code, body = e.code, ""
     except Exception:
-        return 0, ""
+        code, body = 0, ""
+    seen_status.append((url, code))
+    return code, body
+
+
+# What a site-wide status usually means here, so the mail names a cause
+# instead of leaving someone to find it. Measured 2026-09-26: every path
+# answered 403 from two networks, and the bucket was refusing the S3 API with
+# "NotEntitled, please enable R2 through the Cloudflare Dashboard". The pages
+# were all still in the bucket; R2 was switched off at the account.
+SITE_WIDE = {
+    403: "the bucket is not serving. R2 disabled on the Cloudflare account "
+         "(error 10042) did exactly this on 26 Sep; check R2 in the dashboard "
+         "before looking at the build",
+    404: "the bucket is reachable but empty at these paths, which is an upload "
+         "that wrote nothing or a bucket swap",
+    0: "nothing answered at all: DNS, TLS or the zone itself",
+}
+
+
+def outage() -> str | None:
+    """One sentence when the whole site is gone, rather than N failed pages.
+
+    Without this the mail's subject was the first assertion to fail, "home 200
+    got 403", which reads like one broken page. It was the entire site, and
+    the difference decides whether anyone opens the dashboard.
+    """
+    codes = {c for _, c in seen_status}
+    if len(seen_status) < 3 or len(codes) != 1:
+        return None
+    code = codes.pop()
+    if code == 200:
+        return None
+    return (f"the entire site is returning HTTP {code}: all {len(seen_status)} "
+            f"URLs, so this is the site and not a page. "
+            + SITE_WIDE.get(code, "cause unknown"))
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
@@ -203,12 +243,24 @@ def main() -> int:
         check("no source hostname in any canary", bool(bodies) and leaks == 0,
               f"{leaks} leaked of {len(bodies)} pages fetched")
 
+    # Put the site-wide verdict first, so it becomes the subject line.
+    whole = outage()
+    if whole:
+        fails.insert(0, whole)
+
     for o in oks:
         print(f"  ok    {o}")
     for f in fails:
         print(f"  FAIL  {f}")
     print(f"\n{len(oks)} passed, {len(fails)} failed")
     if not fails:
+        # Says "the site is back" once, if it had been reported broken. A
+        # cleared outage that is never announced leaves the next one looking
+        # like a continuation.
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from notify import resolved
+        if resolved("live-site", f"{len(oks)} checks pass on {base}"):
+            print("  mailed: the live site is back")
         return 0
     # Mailed from here, with the failing check as the subject: "[KakashiAnime]
     # live-site: that stylesheet resolves style.x.css -> 404" says what to do.

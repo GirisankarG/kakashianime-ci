@@ -16,7 +16,7 @@ with a shell for titles it does not have.
     python scripts/measure/provider_health.py --json out.json
 """
 from __future__ import annotations
-import argparse, json, os, random, sys
+import argparse, json, os, random, sys, time
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 
@@ -203,6 +203,11 @@ def main():
     ap.add_argument("--min-watchable", type=float, default=0.9,
                     help="with --sample, fail when fewer than this fraction of "
                          "sampled episodes play on ANY of their top buttons")
+    ap.add_argument("--deadline", type=float, default=32.0,
+                    help="minutes. Stop starting new checks past this and "
+                         "publish what was measured. A normal run is 12 "
+                         "minutes; two of the last six hung and were killed at "
+                         "the 50-minute limit, publishing nothing at all")
     ap.add_argument("--vantage", default="ci",
                     help="where this ran. 'residential' is what visitors see and "
                          "outranks 'ci', where Cloudflare walls the runner")
@@ -261,7 +266,16 @@ def main():
         seen_status: dict = {}
         ctx.on("response", lambda r: seen_status.__setitem__(r.url, r.status))
         watchable, lead_ok, nothing_played = 0, 0, []
+        deadline = time.monotonic() + a.deadline * 60
+        ran_out = False
         for case, urls in cases:
+            if time.monotonic() > deadline:
+                # Out of time, not out of providers. Everything still
+                # untried keeps tries[name] == 0, which the verdict below
+                # already treats as unmeasured rather than dead, so a short
+                # run can never demote a provider it did not reach.
+                ran_out = True
+                break
             print(f"== {case}")
             played_here = []
             for name, url in urls:
@@ -295,8 +309,17 @@ def main():
             if not played_here:
                 nothing_played.append(case)
         b.close()
+    if ran_out:
+        # Said out loud and counted. A run that stopped early and does not
+        # say so is indistinguishable from one that checked everything, which
+        # is how 2 of the last 6 runs produced no verdict and no alert: the
+        # runner killed them at 50 minutes and a killed job cannot mail.
+        done = sum(1 for n in tries if tries[n])
+        print(f"\n  STOPPED at the {a.deadline:.0f} minute deadline: "
+              f"{done} of {len(provs)} provider(s) were reached. The rest are "
+              f"unmeasured, not dead.")
 
-    n = len(cases)
+    n = sum(1 for case, urls in cases if any(tries[nm] for nm, _ in urls)) or len(cases)
     kind = f"{n} sampled episode(s)" if a.sample else f"{n} popular titles"
     print(f"\n  provider health, {kind}, audio={a.audio}")
     # Dead means: played nothing AND at least one attempt actually reached the

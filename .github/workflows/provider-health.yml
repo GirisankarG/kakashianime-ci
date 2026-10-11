@@ -1,40 +1,79 @@
-# Server 1 was dead on all 265,000 pages for a day before anyone noticed, because
-# a provider repurposed itself overnight while still answering HTTP 200 with a
-# normal-looking shell. Only watching the <video> element catches that, so this
-# runs the real browser check on a schedule and fails loudly.
+# The daily health run. This public repository holds only this file and a
+# mail script; every check runs from a private checkout, so nothing here
+# names the site, its sources or its players.
+#
+# One script stays public on purpose: notify.py, standard library only. If
+# the private checkout fails, every step that needs it fails too, and the
+# step whose job is to say so must not be among them. A sibling project lost
+# a day to exactly that on 13 Sep: the private checkout failed, every later
+# step was skipped, the mail step with them, and nobody was told.
 name: health
 
 on:
   schedule:
-    - cron: "0 6 * * *"      # daily, before the usual deploy window
+    - cron: "0 6 * * *"
   workflow_dispatch:
 
 jobs:
   health:
     runs-on: ubuntu-latest
-    # 13 providers x 5 titles is 65 checks, and each one sits through 17
-    # seconds of deliberate waits before it can judge the video element. That
-    # is 22 minutes of floor, so a 25 minute limit cancelled the first run
-    # mid-flight. Minutes are unmetered on a public repository, so the limit
-    # only needs to be past the real cost.
     timeout-minutes: 50
+    env:
+      # Absolute, because the checks run inside src/ and the cache and the
+      # catch-all look at the workspace root.
+      ALERT_STATE: ${{ github.workspace }}/alert-state.json
+      ALERTS_SENT: ${{ github.workspace }}/alerts.sent
+      NOTIFY_PRODUCT: ${{ secrets.NOTIFY_PRODUCT }}
+      NOTIFY_SITE: ${{ secrets.NOTIFY_SITE }}
+      SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
+      RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
+      ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+      EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      # Says in one plain sentence which alert secret is missing, before any
-      # check runs. A missing secret prints as nothing in a step's inputs, and
-      # a sibling project lost nine days to reading the resulting error as
-      # something else. Does not stop the checks: the rank still has to be
-      # published. The checks themselves then exit 3, which turns the run red.
-      # What has already been mailed, carried between runs. Without it a
-      # standing problem mails every morning, which is how the channel went
-      # unread before: the site was 403 from the 26th and would have mailed
-      # daily until someone re-enabled R2. Deliberately not kept in R2: the
-      # outage most needing suppression is R2 itself, and a store that shares
-      # fate with the fault is no store. A cache miss means "nothing mailed
-      # yet", which errs toward mailing, never toward silence.
+
+      # Says in one sentence which secret is missing. A missing secret prints
+      # as nothing in a step's inputs, and a sibling project spent nine days
+      # reading the resulting checkout error as something else.
+      - name: Can this run reach the code and tell anyone what it finds
+        continue-on-error: true
+        env:
+          DEPLOY_KEY: ${{ secrets.PRIVATE_REPO_DEPLOY_KEY }}
+          CODE_REPO: ${{ secrets.CODE_REPO }}
+          SOURCE_HOSTS: ${{ secrets.SOURCE_HOSTS }}
+        run: |
+          missing=""
+          for v in DEPLOY_KEY CODE_REPO RESEND_API_KEY ALERT_EMAIL EMAIL_FROM NOTIFY_PRODUCT NOTIFY_SITE SOURCE_HOSTS; do
+            [ -n "${!v}" ] || missing="$missing $v"
+          done
+          if [ -n "$missing" ]; then
+            echo "::error::secret(s) not set:$missing"
+            exit 1
+          fi
+          echo "secrets present"
+
+      - name: The code
+        uses: actions/checkout@v4
+        with:
+          # The repository name is a secret as well: it names the site
+          # as plainly as the URL does.
+          repository: ${{ secrets.CODE_REPO }}
+          ref: main
+          path: src
+          ssh-key: ${{ secrets.PRIVATE_REPO_DEPLOY_KEY }}
+          # Only what the checks read. The catalogue is not tracked and the
+          # parts files are large; none of the checks below need them.
+          sparse-checkout: |
+            scripts/measure
+            scrapers/universal.py
+            scrapers/__init__.py
+            data/provider_overrides.json
+            data/seeds.json
+          sparse-checkout-cone-mode: false
+
       - name: What has already been mailed
         uses: actions/cache@v4
         with:
@@ -42,139 +81,44 @@ jobs:
           key: alert-state-${{ github.run_id }}
           restore-keys: alert-state-
 
-      - name: Can this run tell anyone what it finds
-        continue-on-error: true
-        env:
-          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
-          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
-          ALERT_STATE: alert-state.json
-          SOURCE_HOSTS: ${{ secrets.SOURCE_HOSTS }}
-        run: |
-          missing=""
-          for v in RESEND_API_KEY ALERT_EMAIL EMAIL_FROM SOURCE_HOSTS; do
-            [ -n "${!v}" ] || missing="$missing $v"
-          done
-          if [ -n "$missing" ]; then
-            echo "::error::secret(s) not set:$missing. Every check below will run, and none can mail what it finds."
-            exit 1
-          fi
-          echo "alert secrets present"
       - run: pip install playwright && python -m playwright install --with-deps chromium
+
       - name: Every provider, three popular titles, judged by the video element
-        # A step limit under the job limit. When the job limit fires, the
-        # whole job is cancelled and every later step is skipped, including
-        # the publish and the catch-all mail: seven runs from 6 Oct produced
-        # nothing and told nobody. A step that times out FAILS instead, and
-        # the always() steps after it still run and still mail.
         timeout-minutes: 38
+        working-directory: src
         env:
-          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
-          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
-          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
-          ALERT_STATE: alert-state.json
-          # The provider table. Absent, the script falls back to the private
-          # repo's own module, which does not exist in the public checkout, so
-          # the run dies in 35 seconds with ModuleNotFoundError. That is the
-          # right failure: a public run must never see the private table.
           PROVIDERS_JSON: ${{ secrets.PROVIDERS_JSON }}
-        # -u so progress streams. Python buffers stdout when it is not a
-        # terminal, and the first run printed nothing for 25 minutes, which
-        # made a working check and a hung one look identical.
         run: bash scripts/measure/guard.sh provider-health python -u scripts/measure/provider_health.py --json health.json --rank rank.json
-      # Runs even when the step above exits non-zero, because the report of
-      # which provider died is exactly what is wanted when it fails.
-      - if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: provider-health
-          # rank.json only. health.json is keyed by provider name, and this
-          # repo's artifacts are downloadable by anyone with a GitHub account.
-          path: rank.json
-      # The verdict goes live. player.js reads health/rank.txt at load and
-      # moves dead slots to the back, so a provider that died overnight stops
-      # leading the same morning with no rebuild. Runs when the check FAILED
-      # too: a failure is exactly when the pages need to hear about it. Skips
-      # only when there is no rank file at all, which means the check itself
-      # crashed rather than finding dead providers.
-      - if: always() && hashFiles('rank.json') != ''
+
+      - if: always() && hashFiles('src/rank.json') != ''
         name: Publish today's rank for player.js
+        working-directory: src
         env:
           R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
           R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
           R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
           R2_BUCKET: ${{ secrets.R2_BUCKET }}
-          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
-          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
-          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
-          ALERT_STATE: alert-state.json
         run: pip install boto3 && bash scripts/measure/guard.sh provider-rank python scripts/measure/publish_rank.py rank.json
 
-      # The dead-man switch. Every other check here answers "is the site
-      # broken"; this one answers "did anything look". The laptop half of the
-      # pipeline went dark for four days in September and every watch stayed
-      # green, because a job that never runs raises nothing. Runs last and
-      # always, so it reports even when the provider check above failed.
-      # Is the site CURRENT, which is a different question from "is it
-      # broken" and the one that is invisible from the inside. Arun reported
-      # the site showing last week's episodes; nothing had errored. Runs
-      # first of the two because it measures what a visitor sees, where the
-      # staleness check below measures whether a job ran.
       - if: always()
         name: Can a visitor watch what aired last night
-        env:
-          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
-          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
-          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
-          ALERT_STATE: alert-state.json
-        # No `|| true`. Red is the signal that survives the mail failing.
-        run: bash scripts/measure/guard.sh airing-lag python scripts/measure/airing_lag.py --titles 25
+        working-directory: src
+        run: bash scripts/measure/guard.sh airing-lag python scripts/measure/airing_lag.py --titles 25 --site "$NOTIFY_SITE"
 
-      # The live site's bodies, not its status codes: every way it breaks
-      # answers 200. The stylesheet hash the HTML names must resolve, the
-      # watch page must carry servers and player.js, the rank must be recent,
-      # and no crawl-source host may appear in markup. Prints check names and
-      # counts only, never a body, so it is safe in this public log.
       - if: always()
         name: Does the live site work for a visitor
+        working-directory: src
         env:
           SOURCE_HOSTS: ${{ secrets.SOURCE_HOSTS }}
-          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
-          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
-          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
-          ALERT_STATE: alert-state.json
-        run: bash scripts/measure/guard.sh live-site python scripts/measure/live_canaries.py
+        run: bash scripts/measure/guard.sh live-site python scripts/measure/live_canaries.py --base "$NOTIFY_SITE"
 
       - if: always()
         name: Has the daily pipeline run recently
-        env:
-          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
-          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
-          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
-          ALERT_STATE: alert-state.json
-        # No `|| true`. Red is the signal that survives the mail failing.
-        run: bash scripts/measure/guard.sh nightly-watchdog python scripts/measure/staleness.py
+        working-directory: src
+        run: bash scripts/measure/guard.sh nightly-watchdog python scripts/measure/staleness.py --site "$NOTIFY_SITE"
 
-      # Every check above runs under guard.sh, which mails for that step when
-      # it fails without mailing. What is left for this step is a failure
-      # outside any check, the checkout or the browser install, on a run where
-      # nothing else spoke.
+      # Runs from the PUBLIC copy at the workspace root, so it still works
+      # when the private checkout is what failed.
       - if: failure() && hashFiles('alerts.sent') == ''
         name: The run failed and no check managed to say why
-        env:
-          SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
-          RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
-          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
-          EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
-          ALERT_STATE: alert-state.json
-        run: python scripts/measure/notify.py --check health-run "the run failed before any check could report; open the run"
-
-  # No `sources` job here on purpose. scripts/measure/source_health.py prints
-  # crawl-source hostnames, which must never reach a public log, and GitHub's
-  # datacenter IPs get 403 from the Cloudflare-fronted sources, so from here it
-  # would report live sources dead. daily.sh runs it from the laptop.
+        run: python notify.py --check health-run "the run failed before any check could report; open the run"

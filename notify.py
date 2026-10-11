@@ -19,7 +19,7 @@ reached anyone.
     from notify import alert
     ok = alert("3 provider(s) play nothing: a, b, c", {"providers": {...}})
 
-Subject is "[KakashiAnime] <check>: <message>", so an inbox that receives
+Subject is "[<product>] <check>: <message>", so an inbox that receives
 several sites' alerts sorts by product and says what broke without opening
 the mail. <check> is the calling script's name unless the caller passes one.
 
@@ -47,8 +47,15 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-PRODUCT = "KakashiAnime"
-UA = "kakashianime-watch/1 (+https://kakashianime.me)"
+# The product name and site come from the environment, not from this file,
+# because this is the one script the PUBLIC CI repository keeps: if the
+# private checkout fails, the step that says so must not live inside it. A
+# file published there that named the site would tie that account to it.
+# Locally they come from .env; in CI from the NOTIFY_* secrets, which GitHub
+# also masks wherever a log prints them.
+PRODUCT = os.environ.get("NOTIFY_PRODUCT", "").strip() or "site"
+_SITE = os.environ.get("NOTIFY_SITE", "").strip()
+UA = f"site-watch/1 (+{_SITE})" if _SITE else "site-watch/1"
 # Every mail that was accepted is appended here, one subject per line. The
 # workflow's final step mails "the run failed and no check said why" only when
 # this file is empty, so a crash before any alert() still reaches a person and
@@ -145,7 +152,7 @@ def _sentry(message: str, context: dict | None, level: str) -> bool:
     eid = uuid.uuid4().hex
     event = {"event_id": eid, "message": message, "level": level,
              "platform": "python", "timestamp": time.time(),
-             "tags": {"site": "kakashianime"},
+             "tags": {"site": PRODUCT.lower()},
              "contexts": {"detail": context or {}}}
     body = (json.dumps({"event_id": eid}) + "\n"
             + json.dumps({"type": "event"}) + "\n"
@@ -154,7 +161,7 @@ def _sentry(message: str, context: dict | None, level: str) -> bool:
         f"https://{host}/api/{project}/envelope/", data=body,
         headers={"Content-Type": "application/x-sentry-envelope",
                  "X-Sentry-Auth": f"Sentry sentry_version=7, sentry_key={key}, "
-                                  f"sentry_client=kakashianime-watch/1"})
+                                  f"sentry_client=site-watch/1"})
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
             ok = r.status == 200
@@ -170,7 +177,7 @@ def _sentry(message: str, context: dict | None, level: str) -> bool:
 
 
 # Findings already mailed, so a standing problem is not mailed every morning.
-# Anime_Normal named this as the top noise risk on 2026-09-27, with the
+# A peer session named this as the top noise risk on 2026-09-27, with the
 # evidence: the site had been 403 since the 26th and would have mailed daily
 # until someone re-enabled R2, which is how the channel went unread in the
 # first place. In CI this file is carried between runs by actions/cache; it is
@@ -238,7 +245,7 @@ def alert(message: str, context: dict | None = None, level: str = "error",
     return value: six days of Sentry 200s reached nobody.
     """
     # Older callers prefixed the product themselves. The subject carries it
-    # once, in brackets, so strip a leading "KakashiAnime: " rather than
+    # once, in brackets, so strip a leading "<product>: " rather than
     # print it twice.
     message = re.sub(rf"^{PRODUCT}:\s*", "", message.strip())
     name = _check_name(check)

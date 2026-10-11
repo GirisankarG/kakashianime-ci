@@ -146,8 +146,16 @@ def playing(frame) -> bool:
     kids += [c for f in frame.child_frames for c in f.child_frames]
     for g in kids:
         try:
-            v = g.evaluate("(()=>{const v=document.querySelector('video');"
-                           "return v?[v.readyState,v.currentTime,v.videoWidth]:null})()")
+            # Locator.evaluate, never Frame.evaluate. Frame.evaluate takes no
+            # timeout in Playwright 1.60, and on a frame Cloudflare has walled
+            # it never returns: from 6 Oct every CI run hung inside this call
+            # and was killed at the 50-minute job limit, seven in a row, so no
+            # rank was published and no step after it could mail. The same
+            # hang hit this file in September through document.title. The
+            # locator waits at most 2.5 s for a <video> and then raises, which
+            # the except below turns into "not playing in this frame".
+            v = g.locator("video").first.evaluate(
+                "v => [v.readyState, v.currentTime, v.videoWidth]", timeout=2500)
             if v:
                 return bool(v[1] > 0.5 or (v[0] >= 3 and v[2] > 0))
         except Exception:
@@ -279,6 +287,9 @@ def main():
             print(f"== {case}")
             played_here = []
             for name, url in urls:
+                if time.monotonic() > deadline:
+                    ran_out = True
+                    break
                 page.set_content(
                     f'<iframe src="{url}" width=900 height=506 allow=autoplay '
                     f'referrerpolicy="no-referrer"></iframe>', wait_until="commit")

@@ -62,6 +62,12 @@ jobs:
           echo "alert secrets present"
       - run: pip install playwright && python -m playwright install --with-deps chromium
       - name: Every provider, three popular titles, judged by the video element
+        # A step limit under the job limit. When the job limit fires, the
+        # whole job is cancelled and every later step is skipped, including
+        # the publish and the catch-all mail: seven runs from 6 Oct produced
+        # nothing and told nobody. A step that times out FAILS instead, and
+        # the always() steps after it still run and still mail.
+        timeout-minutes: 38
         env:
           SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
           RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}

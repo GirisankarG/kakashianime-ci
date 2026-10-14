@@ -71,6 +71,7 @@ jobs:
             scrapers/universal.py
             scrapers/__init__.py
             data/provider_overrides.json
+            data/unique_titles.json
             data/seeds.json
           sparse-checkout-cone-mode: false
 

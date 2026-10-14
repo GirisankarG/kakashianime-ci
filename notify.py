@@ -228,13 +228,18 @@ def resolved(check: str, note: str = "") -> bool:
     if not open_now:
         return False
     first = min(v.get("first", "") for v in open_now.values())
-    for k in open_now:
-        state.pop(k, None)
-    _save(state)
     was = open_now[sorted(open_now)[0]].get("message", "")[:100]
-    return _mail(f"[{PRODUCT}] {check}: RESOLVED, {was}",
+    sent = _mail(f"[{PRODUCT}] {check}: RESOLVED, {was}",
                  f"This cleared on its own or was fixed.\n\n"
                  f"first reported: {first}\nwhat it was: {was}\n{note}")
+    # Clear only once the mail landed. Clearing first lost the 14 Oct
+    # ci-watchdog resolution to a run without the mail secrets; kept open,
+    # the next pass with them sends it.
+    if sent:
+        for k in open_now:
+            state.pop(k, None)
+        _save(state)
+    return sent
 
 
 def alert(message: str, context: dict | None = None, level: str = "error",

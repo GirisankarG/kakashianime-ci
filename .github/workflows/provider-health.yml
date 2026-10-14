@@ -86,8 +86,6 @@ jobs:
       - name: Every provider, three popular titles, judged by the video element
         timeout-minutes: 38
         working-directory: src
-        env:
-          PROVIDERS_JSON: ${{ secrets.PROVIDERS_JSON }}
         run: bash scripts/measure/guard.sh provider-health python -u scripts/measure/provider_health.py --json health.json --rank rank.json
 
       - if: always() && hashFiles('src/rank.json') != ''

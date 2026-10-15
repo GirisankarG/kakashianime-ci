@@ -312,7 +312,12 @@ if __name__ == "__main__":
                     help="the name in the subject; say which check spoke")
     ap.add_argument("--test", action="store_true",
                     help="send a harmless mail to prove the path end to end")
+    ap.add_argument("--resolved", action="store_true",
+                    help="say --check is clear again; mails only if it was open")
     a = ap.parse_args()
+    if a.resolved:
+        resolved(a.check, " ".join(a.message))
+        sys.exit(0)
     msg = " ".join(a.message) or ("mail path self-test, nothing is wrong" if a.test
                                   else "a scheduled run failed; open the run")
     ok = alert(msg, {"sent_from": os.environ.get("GITHUB_REPOSITORY") or os.uname().nodename},

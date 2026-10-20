@@ -116,6 +116,13 @@ jobs:
         working-directory: src
         run: bash scripts/measure/guard.sh nightly-watchdog python scripts/measure/staleness.py --site "$NOTIFY_SITE"
 
+      # Temporary (21 Oct): mails a reminder every day from 27 Oct until a
+      # planned rewrite ships. Delete this step and its script once it says so.
+      - if: always()
+        name: Has the planned rewrite shipped
+        working-directory: src
+        run: bash scripts/measure/guard.sh nov-rewrite python scripts/measure/nov_rewrite_due.py --site "$NOTIFY_SITE"
+
       # Runs from the PUBLIC copy at the workspace root, so it still works
       # when the private checkout is what failed.
       - if: failure() && hashFiles('alerts.sent') == ''

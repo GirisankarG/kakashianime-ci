@@ -228,10 +228,13 @@ def resolved(check: str, note: str = "") -> bool:
     if not open_now:
         return False
     first = min(v.get("first", "") for v in open_now.values())
-    was = open_now[sorted(open_now)[0]].get("message", "")[:100]
+    # Every open finding clears below, so name them all: on 20 Oct one mail
+    # closed a disk stop and a build failure but named only the disk stop.
+    msgs = [v.get("message", "")[:100] for v in sorted(open_now.values(), key=lambda v: v.get("first", ""))]
+    was = msgs[0] + (f" (and {len(msgs) - 1} more)" if len(msgs) > 1 else "")
     sent = _mail(f"[{PRODUCT}] {check}: RESOLVED, {was}",
                  f"This cleared on its own or was fixed.\n\n"
-                 f"first reported: {first}\nwhat it was: {was}\n{note}")
+                 f"first reported: {first}\nwhat it was:\n" + "\n".join(f"- {m}" for m in msgs) + f"\n{note}")
     # Clear only once the mail landed. Clearing first lost the 14 Oct
     # ci-watchdog resolution to a run without the mail secrets; kept open,
     # the next pass with them sends it.

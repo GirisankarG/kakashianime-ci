@@ -63,6 +63,14 @@ UA = f"site-watch/1 (+{_SITE})" if _SITE else "site-watch/1"
 SENT_LOG = Path(os.environ.get("ALERTS_SENT", "alerts.sent"))
 
 
+def _log_sent(line: str) -> None:
+    try:
+        with SENT_LOG.open("a") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+
 def _check_name(check: str | None) -> str:
     if check:
         return check
@@ -113,11 +121,7 @@ def _mail(subject: str, text: str) -> bool:
                         print("  notify: mail accepted")
                     else:
                         print(f"  notify: mail accepted, subject: {subject}")
-                    try:
-                        with SENT_LOG.open("a") as f:
-                            f.write(subject + "\n")
-                    except OSError:
-                        pass
+                    _log_sent(subject)
                     return True
                 print(f"  notify: mail HTTP {r.status}, NOT delivered", file=sys.stderr)
                 return False
@@ -291,7 +295,10 @@ def alert(message: str, context: dict | None = None, level: str = "error",
             _save(state)
             # True: a person was told about this, on the day it started. The
             # caller's exit code means "broken and someone knows", which is
-            # still true.
+            # still true. Logged, marked held: daily.sh's watch() and CI's
+            # guard.sh read "a line appeared" as "a person knows", and without
+            # one the 21 Oct nightly called a held repeat undelivered, exit 3.
+            _log_sent(f"(held, mailed {prior['last_mailed'][:10]}) {subject}")
             return True
         text = (f"STILL BROKEN after {age} days, first seen "
                 f"{prior.get('first', '?')[:10]}.\n\n" + text)

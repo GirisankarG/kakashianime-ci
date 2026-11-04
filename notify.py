@@ -107,8 +107,9 @@ def _mail(subject: str, text: str) -> bool:
         return False
     body = json.dumps({"from": sender, "to": [to], "subject": subject,
                        "text": text}).encode()
+    # RESEND_URL only so tests/test_alert_repeat.py can stand in for the API.
     req = urllib.request.Request(
-        "https://api.resend.com/emails", data=body, method="POST",
+        os.environ.get("RESEND_URL", "https://api.resend.com/emails"), data=body, method="POST",
         headers={"Authorization": f"Bearer {key}",
                  "Content-Type": "application/json", "User-Agent": UA})
     for attempt in range(3):
@@ -250,11 +251,15 @@ def resolved(check: str, note: str = "") -> bool:
 
 
 def alert(message: str, context: dict | None = None, level: str = "error",
-          check: str | None = None) -> bool:
+          check: str | None = None, every: bool = False) -> bool:
     """True only if a person will see this, which means the mail was accepted.
 
     Sentry is posted too, as the record, and its result does not change the
     return value: six days of Sentry 200s reached nobody.
+
+    every=True skips the 7-day hold, for a finding that means the site has
+    stopped updating: a build raising NameError on every run from 3 to 4 Nov
+    left the site frozen for 43 h and mailed once.
     """
     # Older callers prefixed the product themselves. The subject carries it
     # once, in brackets, so strip a leading "<product>: " rather than
@@ -286,7 +291,7 @@ def alert(message: str, context: dict | None = None, level: str = "error",
             age = (now - dt.datetime.fromisoformat(prior["last_mailed"])).days
         except (KeyError, ValueError):
             age = ESCALATE_DAYS
-        if age < ESCALATE_DAYS:
+        if age < ESCALATE_DAYS and not every:
             print(f"  notify: same finding as {prior['last_mailed'][:10]}, "
                   f"not mailing again until day {ESCALATE_DAYS} "
                   f"(seen {prior.get('count', 1) + 1} times)")
@@ -300,8 +305,8 @@ def alert(message: str, context: dict | None = None, level: str = "error",
             # one the 21 Oct nightly called a held repeat undelivered, exit 3.
             _log_sent(f"(held, mailed {prior['last_mailed'][:10]}) {subject}")
             return True
-        text = (f"STILL BROKEN after {age} days, first seen "
-                f"{prior.get('first', '?')[:10]}.\n\n" + text)
+        text = (f"STILL BROKEN, first seen {prior.get('first', '?')[:16]}, "
+                f"mailed {prior.get('count', 1)} time(s) before.\n\n" + text)
         subject = f"[{PRODUCT}] {name}: STILL, {message.splitlines()[0][:120]}"
 
     ok = _mail(subject, text)
@@ -322,6 +327,8 @@ if __name__ == "__main__":
                     help="the name in the subject; say which check spoke")
     ap.add_argument("--test", action="store_true",
                     help="send a harmless mail to prove the path end to end")
+    ap.add_argument("--every", action="store_true",
+                    help="mail on every call until --resolved, no 7-day hold")
     ap.add_argument("--resolved", action="store_true",
                     help="say --check is clear again; mails only if it was open")
     a = ap.parse_args()
@@ -332,5 +339,5 @@ if __name__ == "__main__":
                                   else "a scheduled run failed; open the run")
     ok = alert(msg, {"sent_from": os.environ.get("GITHUB_REPOSITORY") or os.uname().nodename},
                level="info" if a.test else "error",
-               check="self-test" if a.test else a.check)
+               check="self-test" if a.test else a.check, every=a.every)
     sys.exit(0 if ok else 1)

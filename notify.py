@@ -10,11 +10,12 @@ to every one of them. Nobody acted, because nobody reads Sentry. An alert that
 lands somewhere nobody looks is not an alert, so this returns True only when
 the mail was accepted.
 
-SENTRY stays as the searchable record and as the place the context dict is
-kept whole. It is posted as a raw envelope, not through the SDK, because
-capture_message() returns an event id on a 429 too: on 2026-09-16 the quota
-was exhausted and every watch printed "reported to Sentry" while nothing
-reached anyone.
+THE RECORD is alerts.jsonl beside ALERT_STATE (logs/ on the Dell): every
+alert, held or mailed, one JSON line with its context dict whole, for grep and
+jq. It replaced a Sentry post on 2026-11-17, when Arun moved every site off
+Sentry. Sentry had only ever held this record here (the site has no Worker
+and no browser SDK), and on 2026-09-16 its quota ran out while every watch
+printed "reported to Sentry".
 
     from notify import alert
     ok = alert("3 provider(s) play nothing: a, b, c", {"providers": {...}})
@@ -44,7 +45,6 @@ import sys
 import time
 import urllib.error
 import urllib.request
-import uuid
 from pathlib import Path
 
 # The product name and site come from the environment, not from this file,
@@ -103,7 +103,7 @@ def _mail(subject: str, text: str) -> bool:
                               ("EMAIL_FROM", sender)) if not v]
     if missing:
         print(f"  notify: mail NOT sent, {', '.join(missing)} not set; "
-              f"nobody reads Sentry, so nobody will hear about this", file=sys.stderr)
+              f"the record alone reaches nobody, so nobody will hear about this", file=sys.stderr)
         return False
     body = json.dumps({"from": sender, "to": [to], "subject": subject,
                        "text": text}).encode()
@@ -144,41 +144,17 @@ def _mail(subject: str, text: str) -> bool:
     return False
 
 
-def _sentry(message: str, context: dict | None, level: str) -> bool:
-    dsn = os.environ.get("SENTRY_DSN", "").strip()
-    if not dsn:
-        print("  notify: SENTRY_DSN not set, no record kept", file=sys.stderr)
-        return False
-    m = re.match(r"https://([^@]+)@([^/]+)/(\d+)", dsn)
-    if not m:
-        print("  notify: SENTRY_DSN is not a DSN", file=sys.stderr)
-        return False
-    key, host, project = m.groups()
-    eid = uuid.uuid4().hex
-    event = {"event_id": eid, "message": message, "level": level,
-             "platform": "python", "timestamp": time.time(),
-             "tags": {"site": PRODUCT.lower()},
-             "contexts": {"detail": context or {}}}
-    body = (json.dumps({"event_id": eid}) + "\n"
-            + json.dumps({"type": "event"}) + "\n"
-            + json.dumps(event) + "\n").encode()
-    req = urllib.request.Request(
-        f"https://{host}/api/{project}/envelope/", data=body,
-        headers={"Content-Type": "application/x-sentry-envelope",
-                 "X-Sentry-Auth": f"Sentry sentry_version=7, sentry_key={key}, "
-                                  f"sentry_client=site-watch/1"})
+def _record(message: str, context: dict | None, level: str, check: str) -> None:
+    path = STATE.parent / "alerts.jsonl"
+    line = {"time": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+            "product": PRODUCT, "check": check, "level": level,
+            "message": message, "context": context or {}}
     try:
-        with urllib.request.urlopen(req, timeout=20) as r:
-            ok = r.status == 200
-            print(f"  notify: Sentry {r.status}{'' if ok else ' (not recorded)'}")
-            return ok
-    except urllib.error.HTTPError as ex:
-        detail = ex.read()[:160].decode(errors="replace")
-        print(f"  notify: Sentry HTTP {ex.code}, not recorded: {detail}", file=sys.stderr)
-        return False
-    except Exception as ex:
-        print(f"  notify: Sentry {type(ex).__name__}, not recorded", file=sys.stderr)
-        return False
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a") as f:
+            f.write(json.dumps(line, default=str) + "\n")
+    except OSError as ex:
+        print(f"  notify: record not kept in {path}: {ex}", file=sys.stderr)
 
 
 # Findings already mailed, so a standing problem is not mailed every morning.
@@ -254,8 +230,8 @@ def alert(message: str, context: dict | None = None, level: str = "error",
           check: str | None = None, every: bool = False) -> bool:
     """True only if a person will see this, which means the mail was accepted.
 
-    Sentry is posted too, as the record, and its result does not change the
-    return value: six days of Sentry 200s reached nobody.
+    Every call is also appended to the record (alerts.jsonl), held or not;
+    that does not change the return value: a record reaches nobody.
 
     every=True skips the 7-day hold, for a finding that means the site has
     stopped updating: a build raising NameError on every run from 3 to 4 Nov
@@ -278,9 +254,9 @@ def alert(message: str, context: dict | None = None, level: str = "error",
             + (f"\nrun: {os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}"
                f"/actions/runs/{os.environ['GITHUB_RUN_ID']}"
                if os.environ.get("GITHUB_RUN_ID") else ""))
-    # Sentry always gets it: it is the record, and a record with gaps is worse
-    # than a noisy one. Only the mail is rate-limited.
-    _sentry(f"{PRODUCT}: {message}", context, level)
+    # The record always gets it: a record with gaps is worse than a noisy one.
+    # Only the mail is rate-limited.
+    _record(message, context, level, name)
 
     state = _load()
     fp = _fingerprint(name, message)

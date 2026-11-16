@@ -25,7 +25,6 @@ jobs:
       ALERTS_SENT: ${{ github.workspace }}/alerts.sent
       NOTIFY_PRODUCT: ${{ secrets.NOTIFY_PRODUCT }}
       NOTIFY_SITE: ${{ secrets.NOTIFY_SITE }}
-      SENTRY_DSN: ${{ secrets.SENTRY_DSN }}
       RESEND_API_KEY: ${{ secrets.RESEND_API_KEY }}
       ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
       EMAIL_FROM: ${{ secrets.EMAIL_FROM }}
